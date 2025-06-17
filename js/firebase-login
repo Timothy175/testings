@@ -1,0 +1,168 @@
+import { signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { auth, db } from "./firebase.js";
+import { doc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+document.addEventListener("DOMContentLoaded", () => {
+  // Inisialisasi elemen UI
+  const loginForm = document.getElementById("firebaseLoginForm");
+  const statusMessage = document.getElementById("statusMessage");
+  const togglePassword = document.querySelector('.toggle-password');
+  const passwordInput = document.getElementById('password');
+  
+  // Fungsi tampilkan pesan
+  const showMessage = (message, type) => {
+    statusMessage.textContent = message;
+    statusMessage.className = `status-alert ${type}`;
+  };
+  
+  // Toggle password visibility
+  if (togglePassword && passwordInput) {
+    togglePassword.addEventListener('click', () => {
+      const type = passwordInput.type === 'password' ? 'text' : 'password';
+      passwordInput.type = type;
+      togglePassword.classList.toggle('fa-eye-slash');
+    });
+  }
+
+  // Fungsi update waktu
+  const updateDateTime = () => {
+    const now = new Date();
+    const dateOptions = { 
+      weekday: 'long', 
+      day: 'numeric', 
+      month: 'long', 
+      year: 'numeric' 
+    };
+    const timeOptions = { 
+      hour: '2-digit', 
+      minute: '2-digit', 
+      second: '2-digit',
+      hour12: false 
+    };
+    
+    document.getElementById('dateDisplay').textContent = 
+      new Intl.DateTimeFormat('en-US', dateOptions).format(now);
+    document.getElementById('timeDisplay').textContent = 
+      now.toLocaleTimeString('en-US', timeOptions);
+  };
+  
+  // Jalankan update waktu
+  updateDateTime();
+  setInterval(updateDateTime, 1000);
+
+  // Handler login
+  if (loginForm) {
+    loginForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      
+      // Ambil nilai input
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      
+      // Validasi input
+      if (!username || !password) {
+        showMessage("Username dan password harus diisi!", "error");
+        return;
+      }
+      
+      // Format email
+      const email = username.includes("@") ? username : `${username}@tivanbm.com`;
+      
+      try {
+        // Tampilkan loading state
+        const submitBtn = loginForm.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Authenticating...';
+        
+        // Autentikasi Firebase
+        const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
+        
+        // Dapatkan parameter captive portal
+        const urlParams = new URLSearchParams(window.location.search);
+        const gw = urlParams.get("gw_address");
+        const port = urlParams.get("gw_port");
+        const mac = urlParams.get("clientmac");
+        const ip = urlParams.get("clientip");
+        
+        // Validasi parameter
+        if (!gw || !port || !mac || !ip) {
+          showMessage("Parameter jaringan tidak lengkap. Silakan hubungi admin.", "error");
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Login';
+          return;
+        }
+        
+        // Catat log sukses ke Firestore
+        await setDoc(doc(db, "wifi_logs", `${user.uid}-${Date.now()}`), {
+          uid: user.uid,
+          email: user.email,
+          username: username,
+          mac: mac,
+          ip: ip,
+          gateway: `${gw}:${port}`,
+          loginTime: new Date().toISOString(),
+          status: "success"
+        });
+        
+        // Redirect ke gateway router
+        const redirectURL = `http://${gw}:${port}/portal/auth?clientMac=${mac}`;
+        
+        // Kirim request ke gateway (menggunakan iframe untuk hindari CORS)
+        const iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.src = redirectURL;
+        document.body.appendChild(iframe);
+        
+        // Tampilkan pesan sukses
+        showMessage("Login berhasil! Mengalihkan...", "success");
+        
+        // Redirect ke halaman sukses
+        setTimeout(() => {
+          window.location.href = "success.html";
+        }, 2000);
+        
+      } catch (error) {
+        // Tangani error autentikasi
+        let errorMessage = "Login gagal: ";
+        
+        // Catat log gagal ke Firestore
+        try {
+          await setDoc(doc(db, "failed_logins", `${Date.now()}`), {
+            username: username,
+            error: error.code || "unknown",
+            timestamp: new Date().toISOString(),
+            ip: new URLSearchParams(window.location.search).get("clientip") || "unknown"
+          });
+        } catch (logError) {
+          console.error("Gagal mencatat log error:", logError);
+        }
+        
+        // Tampilkan pesan error spesifik
+        switch(error.code) {
+          case "auth/invalid-email":
+            errorMessage += "Format email tidak valid";
+            break;
+          case "auth/user-disabled":
+            errorMessage += "Akun dinonaktifkan";
+            break;
+          case "auth/user-not-found":
+            errorMessage += "Akun tidak ditemukan";
+            break;
+          case "auth/wrong-password":
+            errorMessage += "Password salah";
+            break;
+          default:
+            errorMessage += error.message || "Terjadi kesalahan";
+        }
+        
+        showMessage(errorMessage, "error");
+        
+        // Reset tombol submit
+        const submitBtn = loginForm.querySelector('button[type="submit"]');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Login';
+      }
+    });
+  }
+});
